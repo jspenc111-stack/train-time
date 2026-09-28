@@ -427,6 +427,38 @@ test('web API: key required; skip needs key or matching token; app links remembe
   fs.writeFileSync(path.join(__dirname, 'sample-response.json'), JSON.stringify(out, null, 2));
 });
 
+test('getAppLink never hands out the /dev test link (the app can\'t use it)', () => {
+  const EXEC = 'https://script.google.com/macros/s/X/exec';
+  const DEV = 'https://script.google.com/macros/s/D/dev';
+  const run = (getUrl, props) => {
+    const env = makeEnv({ now: START, geocode: () => NYC_GEO, directions: defaultDirections, props });
+    const logs = [];
+    env.Logger = { log: s => logs.push(String(s)) };
+    env.ScriptApp = { getService: () => ({ getUrl: () => getUrl }) };
+    env.getAppLink();
+    return { env, text: logs.join('\n') };
+  };
+  // Google gives the real /exec link: one-tap link as before
+  let r = run(EXEC, { WEB_APP_URL: '' });
+  assert.ok(r.text.includes('#api=' + encodeURIComponent(EXEC) + '&key=k'), r.text);
+  assert.strictEqual(r.env.__store.WEB_APP_URL, EXEC);
+  // Google gives /dev but the app already reported the /exec link: use that
+  r = run(DEV, {});
+  assert.ok(r.text.includes('#api=' + encodeURIComponent(EXEC) + '&key=k'), r.text);
+  assert.strictEqual(r.env.__store.WEB_APP_URL, EXEC);
+  // Only /dev known: key-only link plus steps to paste the /exec link
+  r = run(DEV, { WEB_APP_URL: '' });
+  assert.ok(!r.text.includes(DEV) && !r.text.includes(encodeURIComponent(DEV)), r.text);
+  assert.ok(r.text.includes('#key=k'), r.text);
+  assert.match(r.text, /Manage deployments/);
+  assert.match(r.text, /\/exec/);
+  assert.notStrictEqual(r.env.__store.WEB_APP_URL, DEV);
+  // The app reporting a /dev link never replaces a good one
+  r.env.__store.WEB_APP_URL = EXEC;
+  r.env.doGet({ parameter: { key: 'k', self: DEV } });
+  assert.strictEqual(r.env.__store.WEB_APP_URL, EXEC);
+});
+
 test('skipped events get no notifications', () => {
   const log = [];
   const ev = { id: 'd', title: 'Dinner', location: 'Carbone', start: START };
