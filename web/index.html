@@ -18,17 +18,30 @@
       <p class="sub" id="status">Loading…</p>
     </div>
     <div class="actions">
+      <button class="chip-btn" id="installChip" hidden>Install</button>
       <button class="icon-btn" id="refreshBtn" aria-label="Refresh">⟳</button>
       <button class="icon-btn" id="settingsBtn" aria-label="Settings">⚙︎</button>
     </div>
   </header>
 
-  <div id="banner" class="banner" hidden></div>
+  <div id="banners"></div>
   <main id="list" aria-live="polite"></main>
 
   <dialog id="settings">
     <form method="dialog" id="settingsForm">
       <h2 tabindex="-1" autofocus>Settings</h2>
+
+      <fieldset id="phoneSettings">
+        <legend>This phone</legend>
+        <div class="kv-row"><span>App</span><span id="installStatus">…</span></div>
+        <button type="button" id="installBtn" class="secondary" hidden>Install app</button>
+        <p class="hint" id="installHelp" hidden></p>
+        <div class="kv-row"><span>Notifications</span><span id="notifStatus">…</span></div>
+        <button type="button" id="enableNotifBtn" class="secondary" hidden>Enable notifications</button>
+        <p class="hint" id="notifHelp" hidden></p>
+        <button type="button" id="testBtn" class="secondary">Send test notification</button>
+        <p class="hint" id="testResult"></p>
+      </fieldset>
 
       <fieldset id="tripSettings" disabled>
         <legend>Your trips</legend>
@@ -54,6 +67,12 @@
         <label class="check"><input id="s_checkAlerts" type="checkbox"> Check MTA delay alerts</label>
         <label class="check"><input id="s_includeMultiDay" type="checkbox"> Include multi-day events (e.g. a conference), planned for their start time</label>
         <p class="hint">All-day events are always ignored — they have no start time.</p>
+        <label>Open directions in
+          <select id="s_directionsApp">
+            <option value="google">Google Maps</option>
+            <option value="citymapper">Citymapper</option>
+          </select>
+        </label>
       </fieldset>
 
       <fieldset id="notifSettings" disabled>
@@ -73,14 +92,12 @@
           </label>
         </div>
         <label class="check"><input id="s_showEventDetails" type="checkbox"> Show event names &amp; places in notifications</label>
-        <p class="hint" id="topicHint"></p>
-        <button type="button" id="testBtn" class="secondary">Send test notification</button>
-        <p class="hint" id="testResult"></p>
       </fieldset>
 
       <fieldset id="calSettings" disabled>
         <legend>Calendars to watch</legend>
         <div id="calList" class="hint">Connect first to see your calendars.</div>
+        <button type="button" id="refreshCalsBtn" class="link">Refresh list</button>
       </fieldset>
 
       <details id="connection">
@@ -88,10 +105,15 @@
         <label>Apps Script web app URL
           <input id="apiUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec">
         </label>
+        <p class="hint warn" id="urlHint" hidden></p>
         <label>API key
           <input id="apiKey" type="text" autocomplete="off">
         </label>
-        <button type="button" id="connectBtn" class="secondary">Connect</button>
+        <div class="row">
+          <button type="button" id="connectBtn" class="secondary">Connect</button>
+          <button type="button" id="checkBtn" class="secondary">Check connection</button>
+        </div>
+        <ul class="checklist" id="checkResult" hidden></ul>
       </details>
 
       <p class="hint" id="saveResult"></p>
@@ -102,6 +124,8 @@
     </form>
   </dialog>
 
+  <script src="links.js"></script>
+  <script src="kv.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -5,18 +5,19 @@
  *  - Every 5 minutes, look at today's calendar events that have a location.
  *  - For NYC places, ask Google Maps for subway routes that get you there 0–10 minutes early
  *    (from home, or from your previous event if you'll be coming from there).
- *  - Send phone notifications via the ntfy app: heads-up, 15-minute warning, leave now.
+ *  - Send phone notifications to the installed Leave By app: heads-up, 15-minute warning, leave now.
+ *    The script sends an empty "doorbell" push; the app wakes up and fetches the message from here.
  *  - Serve the plan (and your settings) to the Leave By app.
  *
  * First-time setup: run setup() once from the Apps Script editor. After that, change
  * settings from the app's ⚙️ screen — no need to edit this file.
  *
  * PRIVACY: this file lives in a public GitHub repo. Never put personal details
- * (home address, keys, topic names) in it — they belong in the app's Settings,
+ * (home address, keys, device addresses) in it — they belong in the app's Settings,
  * which are stored privately in this script's Script Properties.
  */
 
-var VERSION = '2.2.1'; // bump together with EXPECTED_BACKEND_VERSION in web/app.js
+var VERSION = '2.3.0'; // bump together with EXPECTED_BACKEND_VERSION in web/app.js
 
 // ───────────────────────────── Defaults (the app's Settings screen overrides these) ─────────────────────────────
 var DEFAULTS = {
@@ -37,8 +38,13 @@ var DEFAULTS = {
   checkAlerts: true,
   showEventDetails: true,  // include event names/places in notifications (off = "your next event")
   includeMultiDay: false,  // plan for multi-day events (e.g. a conference) at their start time; all-day events are always ignored
+  directionsApp: 'google', // tapping an option opens 'google' (Google Maps) or 'citymapper'
   appUrl: 'https://jspenc111-stack.github.io/train-time/' // your app's link, e.g. https://USERNAME.github.io/train-time/ (the app also fills this in)
 };
+
+// Settings that change which train you take. Changing any other setting never re-asks Google Maps.
+var TRIP_SETTINGS = ['homeAddress', 'walkToStationMin', 'minEarlyMin', 'maxEarlyMin', 'comfortMin', 'maxWalkMin',
+  'chainEvents', 'chainGapMin', 'subwayOnly', 'checkAlerts', 'includeMultiDay', 'calendarIds'];
 
 // Fixed behavior (not shown in the app)
 var FIXED = {
@@ -51,9 +57,19 @@ var FIXED = {
   MIN_LOOKAHEAD_HOURS: 8,   // plan the rest of today, and always at least this far ahead
   MAX_OPTIONS: 4,
   TIMEZONE: 'America/New_York',
-  NTFY_SERVER: 'https://ntfy.sh',
-  STORE_CHUNK_CHARS: 2500   // Script Properties allow ~9 KB per value; split our data into safe chunks
+  STORE_CHUNK_CHARS: 2500,  // Script Properties allow ~9 KB per value; split our data into safe chunks
+  MAX_DEVICES: 5,           // phones/browsers that get notifications
+  OUTBOX_MAX: 30,           // messages kept for the app to fetch…
+  OUTBOX_KEEP_HOURS: 24,    // …for at most this long
+  INBOX_HOURS: 6,           // the app is only shown messages this recent…
+  INBOX_MAX: 5,             // …and at most this many per doorbell
+  JWT_HOURS: 12,            // push signatures are valid this long
+  JWT_CACHE_SEC: 21600      // and re-used for 6 h (the longest Apps Script's cache keeps anything)
 };
+
+// Script Properties used by older versions, deleted on upgrade. (The first is the old
+// notification service's topic; its name is split so the repo-wide name check stays simple.)
+var RETIRED_PROPS = ['N' + 'TFY_TOPIC', 'WEB_APP_URL'];
 
 var MTA_ALERTS_URL = 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.json';
 var NYC_BOUNDS = { south: 40.4774, west: -74.2591, north: 40.9176, east: -73.7004 };
@@ -66,11 +82,12 @@ var DELAY_RE = /delay|suspend|not running|no \w+ (?:train )?service|slower|runni
 
 // ───────────────────────────── Setup ─────────────────────────────
 
-/** Run once. Creates secrets and the 5-minute timer. Safe to run again. */
+/** Run once. Creates secrets, push keys and the 5-minute timer. Safe to run again. */
 function setup() {
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('API_KEY')) props.setProperty('API_KEY', Utilities.getUuid().replace(/-/g, ''));
-  if (!props.getProperty('NTFY_TOPIC')) props.setProperty('NTFY_TOPIC', 'leaveby-' + Utilities.getUuid().replace(/-/g, '').slice(0, 16));
+  ensureVapidKeys_();
+  migrate_();
 
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'tick') ScriptApp.deleteTrigger(t);
@@ -79,8 +96,15 @@ function setup() {
 
   tick();
   Logger.log('✅ Setup done. Next: Deploy → New deployment → Web app, then run getAppLink.');
-  Logger.log('Then open the app and set where you leave from in ⚙︎ Settings.');
-  Logger.log('ntfy topic (subscribe in the ntfy app): ' + props.getProperty('NTFY_TOPIC'));
+  Logger.log('Then open the app from its icon → ⚙︎ → set where you leave from → Enable notifications.');
+}
+
+/** Tidy up after older versions (runs once per version, from setup or the timer). */
+function migrate_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('MIGRATED_VERSION') === VERSION) return;
+  RETIRED_PROPS.forEach(function (k) { if (props.getProperty(k) !== null) props.deleteProperty(k); });
+  props.setProperty('MIGRATED_VERSION', VERSION);
 }
 
 /**
@@ -91,35 +115,32 @@ function getAppLink() {
   var props = PropertiesService.getScriptProperties();
   var url = ScriptApp.getService().getUrl();
   if (!url) { Logger.log('Deploy as a web app first (Deploy → New deployment → Web app).'); return; }
-  // Run from the editor, Google often gives the /dev test link, which only works inside the editor.
-  // Fall back to the /exec link the app reported earlier, if there is one.
-  if (isExecUrl_(url)) props.setProperty('WEB_APP_URL', url);
-  else if (isExecUrl_(props.getProperty('WEB_APP_URL'))) url = props.getProperty('WEB_APP_URL');
-  else url = '';
   var base = appUrl_() || 'https://YOUR-USERNAME.github.io/train-time/';
   var key = props.getProperty('API_KEY');
-  Logger.log('1) Subscribe to this topic in the ntfy app: ' + props.getProperty('NTFY_TOPIC'));
-  if (url) {
-    Logger.log('2) Open this link on your phone:\n' + base + '#api=' + encodeURIComponent(url) + '&key=' + key);
-    return;
+  if (/\/dev$/.test(url)) {
+    // Run from the editor, Google often gives the /dev test link, which only works when you're signed in on a computer.
+    Logger.log('⚠️ Google gave this script\'s /dev test link, which the app can\'t use. ' +
+      'Tap Deploy → Manage deployments and copy the Web app URL (it ends in /exec).');
+    Logger.log('Then open this link on your phone, tap ⚙︎ → Connection, paste that URL into "Apps Script web app URL" and tap Connect:\n' + base + '#key=' + key);
+  } else {
+    Logger.log('Open this link on your phone:\n' + base + '#api=' + encodeURIComponent(url) + '&key=' + key);
   }
-  Logger.log('2) Tap Deploy → Manage deployments and copy the Web app URL (it ends in /exec).');
-  Logger.log('3) Open this link on your phone, then tap ⚙︎ → Connection, paste that URL into "Apps Script web app URL" and tap Connect:\n' + base + '#key=' + key);
-}
-
-function isExecUrl_(url) {
-  return /^https:\/\/script\.google(usercontent)?\.com\/.*\/exec$/.test(url || '');
+  Logger.log('Then install the app, open it from its icon → ⚙︎ → Enable notifications → Send test notification.');
 }
 
 /**
- * If your app link or ntfy topic ever leaks, run this: it makes a new API key and topic.
- * Then run getAppLink again, re-open the app with the new link, and re-subscribe in ntfy.
+ * If your app link ever leaks, run this: it makes a new API key and new push keys,
+ * and forgets all registered phones. Then run getAppLink again, re-open the app with
+ * the new link, and tap Enable notifications again.
  */
 function resetSecrets() {
   var props = PropertiesService.getScriptProperties();
   props.setProperty('API_KEY', Utilities.getUuid().replace(/-/g, ''));
-  props.setProperty('NTFY_TOPIC', 'leaveby-' + Utilities.getUuid().replace(/-/g, '').slice(0, 16));
-  Logger.log('🔑 New key and topic created. Now run getAppLink.');
+  props.deleteProperty('VAPID_PRIVATE');
+  props.deleteProperty('VAPID_PUBLIC');
+  props.deleteProperty('PUSH_DEVICES');
+  ensureVapidKeys_();
+  Logger.log('🔑 New key and push keys created. Now run getAppLink, open the new link, and tap Enable notifications again.');
 }
 
 // ───────────────────────────── Settings ─────────────────────────────
@@ -162,6 +183,7 @@ function sanitizeSettings_(input) {
   bool('checkAlerts');
   bool('showEventDetails');
   bool('includeMultiDay');
+  s.directionsApp = input.directionsApp === 'citymapper' ? 'citymapper' : 'google';
   s.calendarIds = Array.isArray(input.calendarIds) && input.calendarIds.length
     ? input.calendarIds.filter(function (x) { return typeof x === 'string' && x; }).slice(0, 20)
     : DEFAULTS.calendarIds.slice();
@@ -188,6 +210,7 @@ function tick() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return;
   try {
+    migrate_();
     runPlanner_(false);
   } finally {
     lock.releaseLock();
@@ -199,6 +222,7 @@ function runPlanner_(forceReplan) {
   var now = now_();
   var nowMs = now.getTime();
   var store = loadStore_();
+  var settingsKey = settingsKey_(s);
   var all = getEvents_(now, s);
   var alertsCache = null;
   var getAlerts = function () {
@@ -216,7 +240,7 @@ function runPlanner_(forceReplan) {
     var origin = chooseOrigin_(ev, all, store, s);
 
     var plan;
-    if (cached && !forceReplan && !needsReplan_(cached, origin, nowMs)) {
+    if (cached && !forceReplan && !needsReplan_(cached, origin, nowMs, settingsKey)) {
       plan = cached;
     } else {
       try {
@@ -231,11 +255,12 @@ function runPlanner_(forceReplan) {
         plan.notifiedLeaveAt = cached.notifiedLeaveAt || null;
         plan.changeCount = cached.changeCount || 0;
       }
+      plan.settingsKey = settingsKey;
     }
     plan.key = key;
     plan.skipped = !!skipped[key];
     plans[key] = plan;
-    if (!plan.skipped) maybeNotify_(plan, now, s);
+    if (!plan.skipped) maybeNotify_(plan, now, s, store);
   });
 
   store.plans = plans;      // drops events that are over / removed
@@ -246,7 +271,8 @@ function runPlanner_(forceReplan) {
 }
 
 /** How long a saved plan stays good before we ask Google Maps again. */
-function needsReplan_(plan, origin, nowMs) {
+function needsReplan_(plan, origin, nowMs, settingsKey) {
+  if (plan.settingsKey !== settingsKey) return true;                 // a trip setting changed
   if (plan.originKey !== origin.key) return true;                    // coming from somewhere else now
   if (plan.status === 'not_nyc' || plan.status === 'vague' || plan.status === 'not_found') return false; // same place → same answer
   if (plan.sent && plan.sent.now) return false;                     // you've left; keep it stable
@@ -254,6 +280,11 @@ function needsReplan_(plan, origin, nowMs) {
   if (plan.status !== 'ok') return age >= 30;
   var minsToLeave = (plan.options[0].leaveAt - nowMs) / 60000;
   return age >= (minsToLeave > 180 ? 60 : 15);
+}
+
+/** Fingerprint of the settings that affect trips (display and notification settings are left out). */
+function settingsKey_(s) {
+  return hash_(JSON.stringify(TRIP_SETTINGS.map(function (k) { return s[k]; })));
 }
 
 function planKey_(ev) {
@@ -322,7 +353,7 @@ function chooseOrigin_(ev, all, store, s) {
   if (!prev) return home;
   var geo = geocode_(prev.location);
   if (!geo || geo.vague) return home;
-  return { key: 'event:' + hash_(geo.address), address: geo.address, label: prev.title, walkMin: 0, fromHome: false, departAfter: prev.end.getTime() };
+  return { key: 'event:' + hash_(geo.address), address: geo.address, label: prev.title, walkMin: 0, fromHome: false, departAfter: prev.end.getTime(), geo: geo };
 }
 
 // ───────────────────────────── Planning ─────────────────────────────
@@ -372,6 +403,10 @@ function buildPlan_(ev, now, origin, getAlerts, s) {
 
   var plan = basePlan_(ev, now, origin, 'ok');
   plan.address = geo.address;
+  // Coordinates for the directions links in the app (cached geocodes; no extra directions calls).
+  var from = origin.geo || geocode_(origin.address);
+  plan.dest = { address: geo.address, lat: geo.lat, lng: geo.lng };
+  plan.origin = { address: origin.address, lat: from ? from.lat : null, lng: from ? from.lng : null, label: origin.label };
   var startMs = ev.start.getTime();
   var nowMs = now.getTime();
   // Can't leave before now, or before your previous event ends.
@@ -525,10 +560,10 @@ function routeToOption_(route, startMs, walkToOriginMin) {
 
 // ───────────────────────────── Google Maps wrappers ─────────────────────────────
 
-/** Geocode with a 6-hour cache. Returns {address, isNyc, vague} or null. */
+/** Geocode with a 6-hour cache. Returns {address, isNyc, vague, lat, lng} or null. */
 function geocode_(location) {
   var cache = CacheService.getScriptCache();
-  var ck = 'geo:' + hash_(location);
+  var ck = 'geo2:' + hash_(location);
   var hit = cache.get(ck);
   if (hit) return hit === 'null' ? null : JSON.parse(hit);
 
@@ -539,7 +574,9 @@ function geocode_(location) {
   var out = null;
   if (res && res.status === 'OK' && res.results && res.results.length) {
     var r = res.results[0];
-    out = { address: r.formatted_address, isNyc: isNyc_(r), vague: isVague_(r) };
+    var loc = (r.geometry && r.geometry.location) || {};
+    out = { address: r.formatted_address, isNyc: isNyc_(r), vague: isVague_(r),
+      lat: typeof loc.lat === 'number' ? loc.lat : null, lng: typeof loc.lng === 'number' ? loc.lng : null };
   }
   cache.put(ck, out ? JSON.stringify(out) : 'null', 21600);
   return out;
@@ -653,14 +690,22 @@ function dueStage_(plan, nowMs, s) {
   return stage;
 }
 
-function maybeNotify_(plan, now, s) {
+/**
+ * A message counts as sent when at least one phone accepted the doorbell, or when no phone is
+ * registered (the app then shows a "notifications are off" banner instead of piling them up).
+ */
+function delivered_(res) {
+  return res.accepted > 0 || res.devices === 0;
+}
+
+function maybeNotify_(plan, now, s, store) {
   var nowMs = now.getTime();
   plan.sent = plan.sent || {};
 
   // Can't plan this one: tell you once, in time to fix the location.
   if (PROBLEM_STATUSES.indexOf(plan.status) >= 0) {
     if (!plan.sent.problem && plan.start - nowMs <= (s.headsUpMin + 60) * 60000) {
-      if (sendNtfy_(buildProblemMessage_(plan, now, s), plan)) plan.sent.problem = nowMs;
+      if (delivered_(notify_(buildProblemMessage_(plan, now, s), plan, store))) plan.sent.problem = nowMs;
     }
     return;
   }
@@ -668,7 +713,7 @@ function maybeNotify_(plan, now, s) {
   var stage = dueStage_(plan, nowMs, s);
   var leaveAt = plan.options.length ? plan.options[0].leaveAt : null;
   if (stage) {
-    if (sendNtfy_(buildMessage_(plan, stage, now, s), plan)) {
+    if (delivered_(notify_(buildMessage_(plan, stage, now, s), plan, store))) {
       var order = ['headsup', 'warning', 'now'];
       for (var i = 0; i <= order.indexOf(stage); i++) plan.sent[order[i]] = plan.sent[order[i]] || nowMs;
       plan.notifiedLeaveAt = leaveAt;
@@ -682,7 +727,7 @@ function maybeNotify_(plan, now, s) {
       (leaveAt - nowMs) / 60000 > FIXED.LEAVE_NOW_MIN &&
       (plan.changeCount || 0) < FIXED.MAX_CHANGE_NOTICES) {
     var msg = buildMessage_(plan, 'change', now, s);
-    if (sendNtfy_(msg, plan)) {
+    if (delivered_(notify_(msg, plan, store))) {
       plan.changeCount = (plan.changeCount || 0) + 1;
       plan.notifiedLeaveAt = leaveAt;
     }
@@ -697,35 +742,31 @@ function isQuiet_(date, s) {
     : (h >= s.quietStartHour && h < s.quietEndHour);
 }
 
+/** stage: 'headsup' | 'warning' | 'now' | 'change'. Returns {title, body, kind, stage, urgency, silent}. */
 function buildMessage_(plan, stage, now, s) {
   var best = plan.options[0];
   var t = fmtTime_;
-  var tag = best.type === 'walk' ? 'walking' : 'metro';
   var d = s.showEventDetails;
   var name = d ? plan.title : 'your event';
   var at = d ? ' @ ' + shortPlace_(plan) : '';
   var from = plan.fromHome ? '' : (d ? 'From ' + plan.originLabel + ' · ' : 'From your previous event · ');
   var bestText = describeOption_(best);
-  var title, body, priority, tags;
+  var title, body;
 
   if (stage === 'headsup') {
     title = 'Leave ' + t(best.leaveAt) + ' → ' + name;
     var alts = plan.options.slice(1, 3).map(function (o) { return describeOption_(o, true); });
     body = t(plan.start) + at + '\n' + from + bestText +
       (alts.length ? '\nOr: ' + alts.join(' · ') : '');
-    priority = isQuiet_(now, s) ? 2 : 3; tags = [tag];
   } else if (stage === 'warning') {
     title = 'Leave in ' + Math.max(1, Math.round((best.leaveAt - now.getTime()) / 60000)) + ' min (' + t(best.leaveAt) + ')';
     body = name + ' at ' + t(plan.start) + '\n' + from + bestText;
-    priority = 4; tags = [tag, 'hourglass_flowing_sand'];
   } else if (stage === 'change') {
     title = 'Change: leave ' + t(best.leaveAt) + ' (was ' + t(plan.notifiedLeaveAt) + ')';
     body = name + ' at ' + t(plan.start) + '\n' + from + bestText;
-    priority = 4; tags = [tag, 'arrows_counterclockwise'];
   } else {
     title = 'Leave now!' + (d ? ' ' + plan.title : '');
     body = bestText + '\nStarts ' + t(plan.start) + at;
-    priority = 5; tags = [tag, 'rotating_light'];
   }
   if (best.delayBufferMin) body += '\n⏱ Leaving ' + best.delayBufferMin + ' min early because of delays.';
   if (plan.alerts && plan.alerts.length) {
@@ -733,7 +774,12 @@ function buildMessage_(plan, stage, now, s) {
   }
   if (best.outsideWindow) body += '\n(No train lands ' + s.minEarlyMin + '–' + s.maxEarlyMin + ' min early — this is the closest.)';
   if (best.nonSubway) body += '\n(No subway-only route — includes bus/ferry.)';
-  return { title: title, message: body, priority: priority, tags: tags, skippable: true };
+  return {
+    title: title, body: body, stage: stage,
+    kind: stage === 'change' ? 'change' : 'trip',
+    urgency: stage === 'headsup' ? 'normal' : 'high',
+    silent: stage === 'headsup' && isQuiet_(now, s)
+  };
 }
 
 function buildProblemMessage_(plan, now, s) {
@@ -746,11 +792,10 @@ function buildProblemMessage_(plan, now, s) {
   }[plan.status];
   return {
     title: "Can't plan: " + (d ? plan.title : 'an event') + ' (' + fmtTime_(plan.start) + ')',
-    message: 'Leave By ' + why + '.' + (plan.status === 'vague' || plan.status === 'not_found'
+    body: 'Leave By ' + why + '.' + (plan.status === 'vague' || plan.status === 'not_found'
       ? ' Add a street address to the event and it will update within 5 minutes.' : ' Check Google Maps for this one.'),
-    priority: isQuiet_(now, s) ? 2 : 3,
-    tags: ['warning'],
-    skippable: false
+    kind: 'problem', stage: 'problem', urgency: 'normal',
+    silent: isQuiet_(now, s)
   };
 }
 
@@ -768,92 +813,439 @@ function shortPlace_(plan) {
   return String(plan.location).split(',')[0];
 }
 
-function sendNtfy_(msg, plan) {
-  var props = PropertiesService.getScriptProperties();
-  var topic = props.getProperty('NTFY_TOPIC');
-  if (!topic) return false;
-  var payload = { topic: topic, title: msg.title, message: msg.message, priority: msg.priority, tags: msg.tags };
-  var actions = [];
-  var app = appUrl_();
-  if (app) {
-    payload.click = app;
-    actions.push({ action: 'view', label: 'Open', url: app });
-  }
-  var webApp = props.getProperty('WEB_APP_URL');
-  if (msg.skippable && plan && plan.key && webApp) {
-    actions.push({
-      action: 'http', label: 'Skip this event', method: 'GET', clear: true,
-      url: webApp + '?action=skip&id=' + encodeURIComponent(plan.key) + '&t=' + skipToken_(plan.key)
-    });
-  }
-  if (actions.length) payload.actions = actions;
+/**
+ * Send a notification: keep the message in the outbox (the app fetches it from here),
+ * then ring every registered phone with an empty push. Returns {id, accepted, devices, statuses}.
+ * Pass the planner's store to save along with it; otherwise the store is loaded and saved here.
+ */
+function notify_(msg, plan, store) {
+  var own = !store;
+  if (own) store = loadStore_();
+  var nowMs = now_().getTime();
+  var id = Math.max(nowMs * 1000, (store.lastMsgId || 0) + 1); // a timestamp plus a counter: always increasing
+  store.lastMsgId = id;
+  store.outbox = pruneOutbox_((store.outbox || []).concat([{
+    id: id, createdAt: nowMs, title: msg.title, body: msg.body,
+    planKey: (plan && plan.key) || null, urgency: msg.urgency || 'normal', silent: !!msg.silent,
+    kind: msg.kind || 'trip', stage: msg.stage || null
+  }]), nowMs);
+
+  var res = ringDevices_(msg);
+  if (res.devices === 0) store.pushWarning = 'no_device';
+  else if (res.accepted > 0) store.pushWarning = null;
+  else store.outbox = store.outbox.filter(function (m) { return m.id !== id; }); // nobody got it: the next run retries
+  if (own) saveStore_(store);
+  res.id = id;
+  return res;
+}
+
+function pruneOutbox_(list, nowMs) {
+  var cutoff = nowMs - FIXED.OUTBOX_KEEP_HOURS * 3600000;
+  return list.filter(function (m) { return m.createdAt >= cutoff; }).slice(-FIXED.OUTBOX_MAX);
+}
+
+/** Send an empty web push ("doorbell") to each phone. Nothing readable goes through the push service. */
+function ringDevices_(msg) {
+  var devices = loadDevices_();
+  var out = { accepted: 0, devices: devices.length, statuses: [] };
+  if (!devices.length) return out;
+  var pub = ensureVapidKeys_().publicKey;
+  var keep = [];
+  devices.forEach(function (d) {
+    var code = 0;
+    try {
+      var resp = UrlFetchApp.fetch(d.endpoint, {
+        method: 'post',
+        payload: '',
+        muteHttpExceptions: true,
+        headers: {
+          TTL: msg.stage === 'now' ? '600' : '1800',
+          Urgency: msg.urgency === 'high' ? 'high' : 'normal',
+          Authorization: 'vapid t=' + vapidJwt_(originOf_(d.endpoint)) + ', k=' + pub
+        }
+      });
+      code = resp.getResponseCode();
+    } catch (e) {
+      code = 0; // network trouble: keep the device, the next run retries
+    }
+    out.statuses.push(code);
+    if (code === 200 || code === 201 || code === 202) out.accepted++;
+    if (code === 404 || code === 410) return; // the phone unsubscribed or reinstalled: forget it
+    if (code === 400 || code === 403) Logger.log('Push rejected (' + code + '): the push keys may not match. Tap Enable notifications again in the app.');
+    keep.push(d);
+  });
+  if (keep.length !== devices.length) saveDevices_(keep);
+  return out;
+}
+
+function originOf_(url) {
+  var m = /^https:\/\/[^\/?#]+/.exec(url);
+  return m ? m[0] : '';
+}
+
+// ── Registered phones (Script Property PUSH_DEVICES: [{endpoint, addedAt}]) ──
+
+function loadDevices_() {
   try {
-    var resp = UrlFetchApp.fetch(FIXED.NTFY_SERVER, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-    return resp.getResponseCode() < 300;
+    var list = JSON.parse(PropertiesService.getScriptProperties().getProperty('PUSH_DEVICES') || '[]');
+    return Array.isArray(list) ? list : [];
   } catch (e) {
-    return false;
+    return [];
   }
 }
 
-/** A per-event code so the notification's Skip button works without exposing your API key. */
-function skipToken_(planKey) {
-  var sig = Utilities.computeHmacSha256Signature(planKey, PropertiesService.getScriptProperties().getProperty('API_KEY'));
-  return sig.slice(0, 12).map(function (b) { return ((b + 256) % 256).toString(16); })
-    .map(function (h) { return h.length < 2 ? '0' + h : h; }).join('');
+function saveDevices_(list) {
+  PropertiesService.getScriptProperties().setProperty('PUSH_DEVICES', JSON.stringify(list.slice(-FIXED.MAX_DEVICES)));
+}
+
+/** Only real push services: Chrome/Android (Google), Firefox, Edge/Windows, Safari. */
+function isPushEndpoint_(url) {
+  if (typeof url !== 'string' || url.length > 1000) return false;
+  var m = /^https:\/\/([a-z0-9.-]+)(:443)?\//i.exec(url);
+  if (!m) return false;
+  var host = m[1].toLowerCase();
+  return host === 'fcm.googleapis.com' || host === 'web.push.apple.com' ||
+    /^[a-z0-9-]+(\.[a-z0-9-]+)*\.push\.services\.mozilla\.com$/.test(host) ||
+    /^[a-z0-9-]+(\.[a-z0-9-]+)*\.notify\.windows\.com$/.test(host);
+}
+
+function addDevice_(endpoint) {
+  var list = loadDevices_().filter(function (d) { return d.endpoint !== endpoint; });
+  list.push({ endpoint: endpoint, addedAt: now_().getTime() });
+  saveDevices_(list); // keeps the newest 5
+  return loadDevices_().length;
+}
+
+function removeDevice_(endpoint) {
+  var list = loadDevices_().filter(function (d) { return d.endpoint !== endpoint; });
+  saveDevices_(list);
+  return list.length;
+}
+
+// ───────────────────────────── Web push signing (VAPID, ES256 on P-256) ─────────────────────────────
+//
+// Push services only accept a doorbell that carries a short token (a JWT) signed with this script's
+// private key. Apps Script has no built-in ECDSA, so the P-256 curve math is done here with BigInt.
+// Checked in tests against Node's crypto and the RFC 6979 test vectors — keep those tests.
+// The nonce k is deterministic (RFC 6979), so no random numbers are needed when signing.
+
+var EC_ = null;
+
+function ec_() {
+  if (EC_) return EC_;
+  var h = function (x) { return BigInt('0x' + x); };
+  EC_ = {
+    p: h('ffffffff00000001000000000000000000000000ffffffffffffffffffffffff'),
+    n: h('ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551'),
+    G: [h('6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296'),
+      h('4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5'), BigInt(1)],
+    N0: BigInt(0), N1: BigInt(1), N2: BigInt(2), N3: BigInt(3), N4: BigInt(4), N8: BigInt(8)
+  };
+  return EC_;
+}
+
+function modP_(a, m) {
+  var r = a % m;
+  return r < ec_().N0 ? r + m : r;
+}
+
+/** Modular inverse (extended Euclid). */
+function modInv_(a, m) {
+  var C = ec_();
+  var lm = C.N1, hm = C.N0, low = modP_(a, m), high = m;
+  while (low > C.N1) {
+    var r = high / low;
+    var nm = hm - lm * r, nw = high - low * r;
+    hm = lm; high = low; lm = nm; low = nw;
+  }
+  return modP_(lm, m);
+}
+
+// Points are Jacobian [X, Y, Z]; Z = 0 is the point at infinity.
+function ecDouble_(P) {
+  var C = ec_(), p = C.p;
+  if (P[2] === C.N0 || P[1] === C.N0) return [C.N0, C.N1, C.N0];
+  var X = P[0], Y = P[1], Z = P[2];
+  var delta = Z * Z % p, gamma = Y * Y % p, beta = X * gamma % p;
+  var alpha = C.N3 * ((X - delta) * (X + delta) % p) % p; // curve a = −3
+  var X3 = modP_(alpha * alpha - C.N8 * beta, p);
+  var Z3 = modP_((Y + Z) * (Y + Z) - gamma - delta, p);
+  var Y3 = modP_(alpha * (C.N4 * beta - X3) - C.N8 * (gamma * gamma % p), p);
+  return [X3, Y3, Z3];
+}
+
+function ecAdd_(P, Q) {
+  var C = ec_(), p = C.p;
+  if (P[2] === C.N0) return Q;
+  if (Q[2] === C.N0) return P;
+  var Z1Z1 = P[2] * P[2] % p, Z2Z2 = Q[2] * Q[2] % p;
+  var U1 = P[0] * Z2Z2 % p, U2 = Q[0] * Z1Z1 % p;
+  var S1 = P[1] * Q[2] % p * Z2Z2 % p, S2 = Q[1] * P[2] % p * Z1Z1 % p;
+  if (U1 === U2) return S1 === S2 ? ecDouble_(P) : [C.N0, C.N1, C.N0];
+  var H = modP_(U2 - U1, p), R = modP_(S2 - S1, p);
+  var HH = H * H % p, HHH = H * HH % p, V = U1 * HH % p;
+  var X3 = modP_(R * R - HHH - C.N2 * V, p);
+  var Y3 = modP_(R * (V - X3) - S1 * HHH, p);
+  var Z3 = P[2] * Q[2] % p * H % p;
+  return [X3, Y3, Z3];
+}
+
+function ecMul_(k, P) {
+  var C = ec_();
+  var R = [C.N0, C.N1, C.N0];
+  var bits = k.toString(2);
+  for (var i = 0; i < bits.length; i++) {
+    R = ecDouble_(R);
+    if (bits.charAt(i) === '1') R = ecAdd_(R, P);
+  }
+  return R;
+}
+
+function ecAffine_(P) {
+  var p = ec_().p;
+  var zi = modInv_(P[2], p), zi2 = zi * zi % p;
+  return [P[0] * zi2 % p, P[1] * zi2 % p * zi % p];
+}
+
+function bytesToBig_(bytes) {
+  var hex = '';
+  for (var i = 0; i < bytes.length; i++) hex += ((bytes[i] & 0xff) + 0x100).toString(16).slice(1);
+  return BigInt('0x' + (hex || '0'));
+}
+
+function bigToBytes_(x, len) {
+  var hex = x.toString(16);
+  while (hex.length < len * 2) hex = '0' + hex;
+  var out = [];
+  for (var i = 0; i < len * 2; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
+  return out;
+}
+
+/** Apps Script only accepts signed bytes (−128…127). */
+function toSigned_(bytes) {
+  return bytes.map(function (b) { b &= 0xff; return b > 127 ? b - 256 : b; });
+}
+
+function unsigned_(bytes) {
+  return bytes.map(function (b) { return b & 0xff; });
+}
+
+function sha256_(bytes) {
+  return unsigned_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, toSigned_(bytes)));
+}
+
+function hmac_(key, data) {
+  return unsigned_(Utilities.computeHmacSha256Signature(toSigned_(data), toSigned_(key)));
+}
+
+function utf8Bytes_(str) {
+  var s = unescape(encodeURIComponent(str));
+  var out = [];
+  for (var i = 0; i < s.length; i++) out.push(s.charCodeAt(i));
+  return out;
+}
+
+function b64url_(bytes) {
+  return Utilities.base64EncodeWebSafe(toSigned_(bytes)).replace(/=+$/, '');
+}
+
+function b64urlDecode_(str) {
+  var s = String(str);
+  while (s.length % 4) s += '=';
+  return unsigned_(Utilities.base64DecodeWebSafe(s));
+}
+
+/** Uncompressed public key 0x04‖X‖Y (65 bytes) for private key d. */
+function p256PublicKey_(d) {
+  var Q = ecAffine_(ecMul_(d, ec_().G));
+  return [4].concat(bigToBytes_(Q[0], 32), bigToBytes_(Q[1], 32));
+}
+
+/** ECDSA P-256 signature of a SHA-256 hash, with RFC 6979 deterministic k. Returns r‖s (64 bytes). */
+function ecdsaSignP256_(hashBytes, d) {
+  var C = ec_(), n = C.n;
+  var h = unsigned_(hashBytes);
+  var e = bytesToBig_(h);
+  var x = bigToBytes_(d, 32);
+  var h1 = bigToBytes_(modP_(e, n), 32);
+  var V = [], K = [];
+  for (var i = 0; i < 32; i++) { V.push(1); K.push(0); }
+  K = hmac_(K, V.concat([0], x, h1)); V = hmac_(K, V);
+  K = hmac_(K, V.concat([1], x, h1)); V = hmac_(K, V);
+  for (;;) {
+    V = hmac_(K, V);
+    var k = bytesToBig_(V);
+    if (k >= C.N1 && k < n) {
+      var r = modP_(ecAffine_(ecMul_(k, C.G))[0], n);
+      if (r !== C.N0) {
+        var s = modP_(modInv_(k, n) * (e + r * d), n);
+        if (s !== C.N0) return bigToBytes_(r, 32).concat(bigToBytes_(s, 32));
+      }
+    }
+    K = hmac_(K, V.concat([0])); V = hmac_(K, V);
+  }
+}
+
+/** Verify an ES256 JWT signature (used by checkPush to prove signing works). */
+function verifyEs256_(signingInput, sigB64, pubBytes) {
+  var C = ec_(), n = C.n;
+  var sig = b64urlDecode_(sigB64);
+  var pub = unsigned_(pubBytes);
+  if (sig.length !== 64 || pub.length !== 65 || pub[0] !== 4) return false;
+  var r = bytesToBig_(sig.slice(0, 32)), s = bytesToBig_(sig.slice(32));
+  if (r < C.N1 || r >= n || s < C.N1 || s >= n) return false;
+  var e = bytesToBig_(sha256_(utf8Bytes_(signingInput)));
+  var w = modInv_(s, n);
+  var Q = [bytesToBig_(pub.slice(1, 33)), bytesToBig_(pub.slice(33, 65)), C.N1];
+  var P = ecAdd_(ecMul_(modP_(e * w, n), C.G), ecMul_(modP_(r * w, n), Q));
+  if (P[2] === C.N0) return false;
+  return modP_(ecAffine_(P)[0], n) === r;
+}
+
+/** Create the push key pair if missing. Returns {privateKey, publicKey} (base64url). */
+function ensureVapidKeys_() {
+  var props = PropertiesService.getScriptProperties();
+  var priv = props.getProperty('VAPID_PRIVATE');
+  var pub = props.getProperty('VAPID_PUBLIC');
+  if (priv && pub) return { privateKey: priv, publicKey: pub };
+  var seed = unsigned_(Utilities.computeHmacSha256Signature(Utilities.getUuid() + Date.now(), Utilities.getUuid()));
+  var n = ec_().n;
+  var d = modP_(bytesToBig_(seed), n - ec_().N1) + ec_().N1; // in [1, n−1]
+  priv = b64url_(bigToBytes_(d, 32));
+  pub = b64url_(p256PublicKey_(d));
+  props.setProperties({ VAPID_PRIVATE: priv, VAPID_PUBLIC: pub });
+  return { privateKey: priv, publicKey: pub };
+}
+
+function signVapidJwt_(aud) {
+  var keys = ensureVapidKeys_();
+  var header = b64url_(utf8Bytes_(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  var claims = b64url_(utf8Bytes_(JSON.stringify({
+    aud: aud,
+    exp: Math.floor(now_().getTime() / 1000) + FIXED.JWT_HOURS * 3600,
+    sub: appUrl_() // the app's link — never an email address
+  })));
+  var input = header + '.' + claims;
+  var sig = ecdsaSignP256_(sha256_(utf8Bytes_(input)), bytesToBig_(b64urlDecode_(keys.privateKey)));
+  return input + '.' + b64url_(sig);
+}
+
+/** The signed token for one push service, re-used from the cache so signing happens rarely. */
+function vapidJwt_(aud) {
+  var cache = CacheService.getScriptCache();
+  var ck = 'vapid:' + hash_(ensureVapidKeys_().publicKey + '|' + appUrl_()) + ':' + aud;
+  var hit = cache.get(ck);
+  if (hit) return hit;
+  var jwt = signVapidJwt_(aud);
+  cache.put(ck, jwt, FIXED.JWT_CACHE_SEC);
+  return jwt;
+}
+
+/** Run from the editor to check that push signing works here. */
+function checkPush() {
+  var ok = false;
+  try { ok = typeof BigInt === 'function' && String(BigInt(6) * BigInt(7)) === '42'; } catch (e) { ok = false; }
+  if (!ok) { Logger.log('❌ This script needs the V8 runtime (Project Settings → Enable Chrome V8 runtime).'); return; }
+  var keys = ensureVapidKeys_();
+  var jwt = signVapidJwt_('https://fcm.googleapis.com');
+  var parts = jwt.split('.');
+  if (verifyEs256_(parts[0] + '.' + parts[1], parts[2], b64urlDecode_(keys.publicKey))) {
+    Logger.log('✅ Push signing works');
+  } else {
+    Logger.log('❌ Push signing failed — run resetSecrets, then tap Enable notifications again in the app.');
+  }
+  var n = loadDevices_().length;
+  Logger.log(n + ' device' + (n === 1 ? '' : 's') + ' registered for notifications' +
+    (n ? '.' : ' — open the app from its icon → ⚙︎ → Enable notifications.'));
 }
 
 // ───────────────────────────── Web API for the app ─────────────────────────────
 
+/** Compare secrets without leaking how many characters matched. */
+function safeEqual_(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
+  var diff = a.length ^ b.length;
+  for (var i = 0; i < b.length; i++) diff |= (a.charCodeAt(i % a.length) ^ b.charCodeAt(i));
+  return diff === 0;
+}
+
+function keyOk_(key) {
+  return safeEqual_(key, PropertiesService.getScriptProperties().getProperty('API_KEY'));
+}
+
 function doGet(e) {
   var p = (e && e.parameter) || {};
-  var props = PropertiesService.getScriptProperties();
-  var keyOk = !!p.key && p.key === props.getProperty('API_KEY');
+  if (!keyOk_(p.key)) return json_({ error: 'unauthorized' });
   var action = p.action || 'plans';
 
-  // Skip from a notification button: authorised by the per-event code instead of the API key.
-  if (action === 'skip' && p.id && (keyOk || (p.t && p.t === skipToken_(p.id)))) {
-    return json_(withLock_(function () { return setSkipped_(p.id, true); }));
-  }
-  if (!keyOk) return json_({ error: 'unauthorized' });
-
-  // The app tells us its own links, so notification buttons can open it and skip events.
-  if (isExecUrl_(p.self) && props.getProperty('WEB_APP_URL') !== p.self) {
-    props.setProperty('WEB_APP_URL', p.self);
-  }
+  // The app tells us its own link, so push signatures can name it.
   if (p.app && /^https:\/\//.test(p.app) && settings_().appUrl !== p.app) {
     var cur = settings_();
     cur.appUrl = p.app;
     saveSettings_(cur);
   }
 
+  if (action === 'inbox') return json_(inbox_(Number(p.since) || 0));
+  if (action === 'ping') return json_(ping_());
   if (action === 'test') {
-    var ok = sendNtfy_({ title: 'Leave By test 🚇', message: 'Notifications are working!', priority: 3, tags: ['white_check_mark'] });
-    return json_({ ok: ok });
+    var r = withLock_(function () {
+      return notify_({ title: 'Leave By test 🚇', body: 'Notifications are working!', kind: 'test', stage: 'test', urgency: 'normal' });
+    });
+    return json_({ ok: r.accepted > 0, accepted: r.accepted, devices: r.devices, statuses: r.statuses });
   }
   if (action === 'settings') return json_(settingsView_());
+  if (action === 'skip' && p.id) return json_(withLock_(function () { return setSkipped_(p.id, true); }));
   if (action === 'unskip' && p.id) return json_(withLock_(function () { return setSkipped_(p.id, false); }));
   if (action === 'refresh') return json_(publicView_(withLock_(function () { return runPlanner_(true); })));
+  if (action === 'update') return json_(publicView_(withLock_(function () { return runPlanner_(false); })));
   return json_(publicView_(loadStore_()));
 }
 
-/** Saving settings from the app (POST with a text/plain JSON body: {key, settings}). */
+/** From the app (POST with a text/plain JSON body): saveSettings, subscribe, unsubscribe. */
 function doPost(e) {
   var body = {};
   try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return json_({ error: 'bad request' }); }
-  if (!body.key || body.key !== PropertiesService.getScriptProperties().getProperty('API_KEY')) return json_({ error: 'unauthorized' });
-  if (body.action !== 'saveSettings') return json_({ error: 'unknown action' });
-  var merged = settings_();
-  Object.keys(body.settings || {}).forEach(function (k) { merged[k] = body.settings[k]; });
-  saveSettings_(merged);
-  var store = withLock_(function () { return runPlanner_(true); });
-  var view = settingsView_();
-  view.plans = publicView_(store);
-  return json_(view);
+  if (!keyOk_(body.key)) return json_({ error: 'unauthorized' });
+  if (body.action === 'saveSettings') {
+    // Save only — the app asks for an update right after, so this answers quickly.
+    var merged = JSON.parse(JSON.stringify(settings_()));
+    Object.keys(body.settings || {}).forEach(function (k) { merged[k] = body.settings[k]; });
+    return json_({ ok: true, settings: saveSettings_(merged) });
+  }
+  if (body.action === 'subscribe') {
+    if (!isPushEndpoint_(body.endpoint)) return json_({ error: 'unsupported push service' });
+    var n = addDevice_(body.endpoint);
+    return json_({ ok: true, devices: n, lastId: loadStore_().lastMsgId || 0 });
+  }
+  if (body.action === 'unsubscribe') {
+    return json_({ ok: true, devices: removeDevice_(String(body.endpoint || '')) });
+  }
+  return json_({ error: 'unknown action' });
+}
+
+/** Messages newer than `since` from the last few hours, oldest first (the app shows them). */
+function inbox_(since) {
+  var store = loadStore_();
+  var cutoff = now_().getTime() - FIXED.INBOX_HOURS * 3600000;
+  var messages = (store.outbox || []).filter(function (m) { return m.id > since && m.createdAt >= cutoff; })
+    .slice(-FIXED.INBOX_MAX);
+  return { messages: messages, lastId: store.lastMsgId || 0 };
+}
+
+function ping_() {
+  var hasTimer = false;
+  try {
+    hasTimer = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'tick'; });
+  } catch (e) { /* can't tell */ }
+  return {
+    ok: true,
+    version: VERSION,
+    now: now_().getTime(),
+    hasTimer: hasTimer,
+    lastRunAt: loadStore_().updatedAt || null,
+    pushDevices: loadDevices_().length,
+    pushPublicKey: ensureVapidKeys_().publicKey
+  };
 }
 
 function withLock_(fn) {
@@ -883,7 +1275,8 @@ function settingsView_() {
     settings: settings_(),
     defaults: DEFAULTS,
     calendars: calendars,
-    ntfyTopic: PropertiesService.getScriptProperties().getProperty('NTFY_TOPIC')
+    pushPublicKey: ensureVapidKeys_().publicKey,
+    pushDevices: loadDevices_().length
   };
 }
 
@@ -894,17 +1287,21 @@ function publicView_(store) {
       key: k, title: p.title, location: p.location, address: p.address || null, start: p.start,
       status: p.status, message: p.message || null, options: p.options, alerts: p.alerts || [],
       originLabel: p.originLabel, fromHome: p.fromHome, skipped: !!p.skipped,
-      walkMin: p.walkMin || null, sent: Object.keys(p.sent || {})
+      walkMin: p.walkMin || null, sent: Object.keys(p.sent || {}),
+      origin: p.origin || null, dest: p.dest || null
     };
   }).sort(function (a, b) { return a.start - b.start; });
   var s = settings_();
+  var devices = loadDevices_().length;
   return {
     version: VERSION,
     needsHome: !s.homeAddress,
     updatedAt: store.updatedAt || null,
     origin: s.homeAddress,
     walkToStationMin: s.walkToStationMin,
-    ntfyTopic: PropertiesService.getScriptProperties().getProperty('NTFY_TOPIC'),
+    settings: s,
+    pushDevices: devices,
+    pushWarning: devices ? null : (store.pushWarning || null),
     plans: plans
   };
 }
@@ -923,9 +1320,9 @@ function loadStore_() {
   for (var i = 0; i < n; i++) raw += props.getProperty('STORE_' + i) || '';
   try {
     var s = raw ? JSON.parse(raw) : null;
-    if (s && s.plans) { s.skipped = s.skipped || {}; return s; }
+    if (s && s.plans) { s.skipped = s.skipped || {}; s.outbox = s.outbox || []; return s; }
   } catch (e) { /* start fresh */ }
-  return { plans: {}, skipped: {}, updatedAt: null };
+  return { plans: {}, skipped: {}, outbox: [], updatedAt: null };
 }
 
 function saveStore_(store) {
@@ -955,9 +1352,13 @@ function hash_(str) {
   return (h >>> 0).toString(36);
 }
 
-/** Handy for testing from the editor: sends a test notification. */
+/** Handy for testing from the editor: sends a test notification to every registered phone. */
 function sendTestNotification() {
-  sendNtfy_({ title: 'Leave By test 🚇', message: 'Notifications are working!', priority: 3, tags: ['white_check_mark'] });
+  var r = withLock_(function () {
+    return notify_({ title: 'Leave By test 🚇', body: 'Notifications are working!', kind: 'test', stage: 'test', urgency: 'normal' });
+  });
+  Logger.log(r.devices ? 'Sent to ' + r.accepted + ' of ' + r.devices + ' device(s). Push service replies: ' + r.statuses.join(', ')
+    : 'No device registered — open the app from its icon → ⚙︎ → Enable notifications.');
 }
 
 /** Handy for checking what the app sees: logs the current plans. */

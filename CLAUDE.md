@@ -1,6 +1,6 @@
 # CLAUDE.md — Leave By
 
-Personal NYC "when to leave" app. A Google Apps Script backend reads Google Calendar, plans subway trips with Google Maps, and sends ntfy notifications. A static PWA on GitHub Pages shows the plan and edits settings. **SPEC.md is the source of truth for behavior.**
+Personal NYC "when to leave" app. A Google Apps Script backend reads Google Calendar, plans subway trips with Google Maps, and sends web push notifications to the installed app. A static PWA on GitHub Pages shows the plan and edits settings. **SPEC.md is the source of truth for behavior.**
 
 ## About the owner
 
@@ -11,6 +11,7 @@ Personal NYC "when to leave" app. A Google Apps Script backend reads Google Cale
 
 - `apps-script/Code.gs`: the whole backend (one file, Apps Script V8). `appsscript.json` is its manifest (permissions, timezone, web app).
 - `web/`: the PWA. Plain HTML/CSS/JS with no build step and no dependencies. It is served as-is by `.github/workflows/pages.yml`.
+  - `app.js` (screens and settings), `links.js` (Google Maps / Citymapper links; also tested in Node), `kv.js` (IndexedDB shared with the service worker), `sw.js` (offline cache and notifications).
 - `tests/run.js`: runs Code.gs in Node's `vm` with fake Google services. No npm packages.
 - `tools/make_icons.py`: regenerates `web/icons/*.png` (needs Pillow).
 
@@ -23,7 +24,7 @@ Personal NYC "when to leave" app. A Google Apps Script backend reads Google Cale
 
 1. **This repo is public.** Never commit:
    - personal details (home address or station, names, calendar content),
-   - secrets (API key, ntfy topic, the `script.google.com/macros/s/...` web app link),
+   - secrets (API key, push keys, push device addresses, the `script.google.com/macros/s/...` web app link),
    - real email addresses.
 
    Personal settings live in the app's Settings, which are stored in Script Properties. Use made-up examples in demos and tests.
@@ -41,8 +42,12 @@ Personal NYC "when to leave" app. A Google Apps Script backend reads Google Cale
 
 ## Apps Script gotchas
 
-- Functions ending in `_` are private: they're hidden from the editor's Run menu and can't be called by the web app. Public entry points are `setup`, `getAppLink`, `resetSecrets`, `tick`, `doGet`, `doPost`, `sendTestNotification`, and `logPlans`.
-- Script Properties hold ~9 KB per value. The plan store is chunked (`STORE_0..n`), so keep using `loadStore_`/`saveStore_`.
+- Functions ending in `_` are private: they're hidden from the editor's Run menu and can't be called by the web app. Public entry points are `setup`, `getAppLink`, `resetSecrets`, `tick`, `doGet`, `doPost`, `sendTestNotification`, `checkPush`, and `logPlans`.
+- Web API actions: GET `plans`, `refresh`, `update`, `settings`, `ping`, `inbox`, `test`, `skip`, `unskip`; POST `saveSettings`, `subscribe`, `unsubscribe`. Every one needs the API key, compared with `safeEqual_`.
+- The "Web push signing" section of Code.gs (P-256 ECDSA with BigInt) must keep its tests: the RFC 6979 test vector and the checks against Node's `crypto` (public key and JWT signature). Run them after any change there.
+- Notifications are "doorbells": an empty push, then the app fetches the text from `inbox`. Never put message text in the push itself.
+- Script Properties hold ~9 KB per value. The plan store (plans and the notification outbox) is chunked (`STORE_0..n`), so keep using `loadStore_`/`saveStore_`.
+- `CacheService` keeps things for at most 6 hours.
 - Everything is global in one file, and code runs in the `America/New_York` timezone.
 - Apps Script built-in services have no ES-module imports. Anything the tests touch must be mocked in `makeEnv()` in `tests/run.js`.
 - Web app responses redirect through googleusercontent.com. The PWA must use GET, or POST with `Content-Type: text/plain`, to avoid CORS preflight.
