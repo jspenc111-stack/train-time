@@ -22,7 +22,7 @@
   var NUM_FIELDS = ['walkToStationMin', 'maxWalkMin', 'minEarlyMin', 'maxEarlyMin', 'headsUpMin', 'warningMin', 'quietStartHour', 'quietEndHour'];
   var BOOL_FIELDS = ['chainEvents', 'subwayOnly', 'checkAlerts', 'showEventDetails', 'includeMultiDay'];
   // Must match VERSION in apps-script/Code.gs. If they differ, the app asks you to paste the new script.
-  var EXPECTED_BACKEND_VERSION = '2.2.0';
+  var EXPECTED_BACKEND_VERSION = '2.2.1';
   var STALE_MIN = 20;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -30,9 +30,9 @@
 
   // ── Connection (also accepts a one-tap setup link: #api=…&key=…) ──
   function readHashSetup() {
-    if (!location.hash || location.hash.indexOf('api=') < 0) return;
+    if (!location.hash || !/(api|key)=/.test(location.hash)) return;
     var params = new URLSearchParams(location.hash.slice(1));
-    if (params.get('api')) LS.set('apiUrl', params.get('api'));
+    if (params.get('api') && !urlProblem(params.get('api'))) LS.set('apiUrl', params.get('api'));
     if (params.get('key')) LS.set('apiKey', params.get('key'));
     history.replaceState(null, '', location.pathname + location.search);
   }
@@ -41,6 +41,21 @@
   function appUrl() { return location.origin + location.pathname; }
 
   // ── Talking to the script ──
+  // Links ending in /dev are Google's test links: they only work inside the script editor.
+  function urlProblem(url) {
+    return /\/dev\/?$/.test(url || '')
+      ? 'That web app URL ends in /dev, which only works inside Google\'s editor. In script.google.com, tap Deploy → Manage deployments and copy the Web app URL that ends in /exec.'
+      : '';
+  }
+  function send(url, opts) {
+    var problem = urlProblem(conn().url);
+    if (problem) return Promise.reject(new Error(problem));
+    return fetch(url, opts).catch(function () {
+      throw new Error(navigator.onLine
+        ? 'Can\'t reach your script. In script.google.com, check Deploy → Manage deployments: Execute as "Me", Who has access "Anyone".'
+        : 'You\'re offline.');
+    }).then(checkJson);
+  }
   function checkJson(r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json().then(function (j) {
@@ -51,14 +66,13 @@
   function api(action, extra) {
     var c = conn();
     var q = new URLSearchParams(Object.assign({ action: action, key: c.key, self: c.url, app: appUrl() }, extra || {}));
-    return fetch(c.url + (c.url.indexOf('?') >= 0 ? '&' : '?') + q.toString(), { redirect: 'follow' }).then(checkJson);
+    return send(c.url + (c.url.indexOf('?') >= 0 ? '&' : '?') + q.toString(), { redirect: 'follow' });
   }
   function apiPost(body) {
     var c = conn();
     body.key = c.key;
     // text/plain keeps this a "simple" request, which Apps Script accepts from another website.
-    return fetch(c.url, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) })
-      .then(checkJson);
+    return send(c.url, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
   }
 
   function load(action) {

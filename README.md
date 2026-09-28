@@ -39,6 +39,7 @@ The full design is in [SPEC.md](SPEC.md).
 4. Pick **getAppLink** in the dropdown and tap **Run**. The log at the bottom shows:
    - your **ntfy topic**
    - a **link** to open the app, already connected
+   - or, if Google only gave the script's test link, steps to copy the **Web app URL** (ends in `/exec`) from **Deploy → Manage deployments** and paste it into the app's ⚙︎ → **Connection**
 
 ### 3. Notifications
 
@@ -98,4 +99,5 @@ Add `?demo` to the app's address (e.g. `…/train-time/?demo`) to see sample dat
 
 ## Troubleshooting
 
+- **The app says "ends in /dev" or "Can't reach your script":** in script.google.com, tap **Deploy → Manage deployments**. Check **Execute as: Me** and **Who has access: Anyone**, then copy the **Web app URL** (it ends in `/exec`). In the app, tap ⚙︎ → **Connection**, paste it into **Apps Script web app URL**, and tap **Connect**.
 - **setup fails with a permission error:** Google may need broader access than read-only for your account type. Delete the `"oauthScopes"` block from `appsscript.json`, save, and run **setup** again.

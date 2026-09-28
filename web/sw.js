@@ -1,5 +1,5 @@
 // Service worker: keeps the app itself available offline (the data is cached by app.js).
-const CACHE = 'leave-by-v4';
+const CACHE = 'leave-by-v5';
 const ASSETS = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

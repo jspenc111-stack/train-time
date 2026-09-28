@@ -16,7 +16,7 @@
  * which are stored privately in this script's Script Properties.
  */
 
-var VERSION = '2.2.0'; // bump together with EXPECTED_BACKEND_VERSION in web/app.js
+var VERSION = '2.2.1'; // bump together with EXPECTED_BACKEND_VERSION in web/app.js
 
 // ───────────────────────────── Defaults (the app's Settings screen overrides these) ─────────────────────────────
 var DEFAULTS = {
@@ -91,10 +91,24 @@ function getAppLink() {
   var props = PropertiesService.getScriptProperties();
   var url = ScriptApp.getService().getUrl();
   if (!url) { Logger.log('Deploy as a web app first (Deploy → New deployment → Web app).'); return; }
-  props.setProperty('WEB_APP_URL', url);
+  // Run from the editor, Google often gives the /dev test link, which only works inside the editor.
+  // Fall back to the /exec link the app reported earlier, if there is one.
+  if (isExecUrl_(url)) props.setProperty('WEB_APP_URL', url);
+  else if (isExecUrl_(props.getProperty('WEB_APP_URL'))) url = props.getProperty('WEB_APP_URL');
+  else url = '';
   var base = appUrl_() || 'https://YOUR-USERNAME.github.io/train-time/';
+  var key = props.getProperty('API_KEY');
   Logger.log('1) Subscribe to this topic in the ntfy app: ' + props.getProperty('NTFY_TOPIC'));
-  Logger.log('2) Open this link on your phone:\n' + base + '#api=' + encodeURIComponent(url) + '&key=' + props.getProperty('API_KEY'));
+  if (url) {
+    Logger.log('2) Open this link on your phone:\n' + base + '#api=' + encodeURIComponent(url) + '&key=' + key);
+    return;
+  }
+  Logger.log('2) Tap Deploy → Manage deployments and copy the Web app URL (it ends in /exec).');
+  Logger.log('3) Open this link on your phone, then tap ⚙︎ → Connection, paste that URL into "Apps Script web app URL" and tap Connect:\n' + base + '#key=' + key);
+}
+
+function isExecUrl_(url) {
+  return /^https:\/\/script\.google(usercontent)?\.com\/.*\/exec$/.test(url || '');
 }
 
 /**
@@ -808,7 +822,7 @@ function doGet(e) {
   if (!keyOk) return json_({ error: 'unauthorized' });
 
   // The app tells us its own links, so notification buttons can open it and skip events.
-  if (p.self && /^https:\/\/script\.google(usercontent)?\.com\//.test(p.self) && props.getProperty('WEB_APP_URL') !== p.self) {
+  if (isExecUrl_(p.self) && props.getProperty('WEB_APP_URL') !== p.self) {
     props.setProperty('WEB_APP_URL', p.self);
   }
   if (p.app && /^https:\/\//.test(p.app) && settings_().appUrl !== p.app) {

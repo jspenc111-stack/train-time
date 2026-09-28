@@ -65,7 +65,7 @@ Settings are edited in the app (⚙︎). They're stored in Script Properties und
 Secrets, created by `setup()`:
 - `API_KEY`: used by the app.
 - `NTFY_TOPIC`: a random topic name.
-- `WEB_APP_URL`: the backend's own link. It is saved by `getAppLink()`, and the app also reports it.
+- `WEB_APP_URL`: the backend's own link (the one ending in `/exec`). It is saved by `getAppLink()`, and the app also reports it. Links ending in `/dev` are never saved: they are Google's test links and only work inside the script editor.
 
 ## 4. Backend behavior
 
@@ -216,7 +216,7 @@ Script Properties allow about 9 KB per value, so plans are saved in chunks (`STO
 - **Your trips:** leaving from, walk time, walk threshold, arrival window, and checkboxes for previous event / subway only / MTA alerts.
 - **Notifications:** heads-up and warning minutes, quiet hours, show event details, the ntfy topic, and a test button.
 - **Calendars to watch:** checkboxes.
-- **Connection** (collapsed): web app URL and key. A one-tap link `…/#api=<url>&key=<key>` fills these in.
+- **Connection** (collapsed): web app URL and key. A one-tap link `…/#api=<url>&key=<key>` fills these in (a `#key=<key>` link fills in just the key). A `/dev` URL is refused with a message saying to copy the `/exec` Web app URL from **Deploy → Manage deployments**. If the script can't be reached at all, the app says to check the deployment is **Execute as: Me** / **Who has access: Anyone**.
 - **Save:** re-plans and closes the sheet. The Save/Close bar stays visible at the bottom.
 
 **Offline:** the service worker caches the app files, and the last plans are kept on the phone. When offline, the app shows them with an "Offline" label.
@@ -233,7 +233,7 @@ Script Properties allow about 9 KB per value, so plans are saved in chunks (`STO
    1. Paste `Code.gs` and `appsscript.json` into a new Apps Script project.
    2. Run `setup` and approve read-only calendar access.
    3. Deploy as a web app (Me / Anyone).
-   4. Run `getAppLink`.
+   4. Run `getAppLink`. When run from the editor, Google may only give the `/dev` test link; then `getAppLink` uses the `/exec` link the app reported earlier, or else logs a key-only link and asks me to paste the `/exec` Web app URL from **Deploy → Manage deployments** into ⚙︎ → Connection.
    5. Subscribe to the topic in ntfy.
    6. Open the link and install the app.
    7. Set **Leaving from** in ⚙︎.
