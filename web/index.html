@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Leave By</title>
+  <meta name="theme-color" content="#0b1020">
+  <meta name="description" content="When to leave and which train to take for today's NYC events.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Leave By</h1>
+      <p class="sub" id="status">Loading…</p>
+    </div>
+    <div class="actions">
+      <button class="icon-btn" id="refreshBtn" aria-label="Refresh">⟳</button>
+      <button class="icon-btn" id="settingsBtn" aria-label="Settings">⚙︎</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+  <main id="list" aria-live="polite"></main>
+
+  <dialog id="settings">
+    <form method="dialog" id="settingsForm">
+      <h2 tabindex="-1" autofocus>Settings</h2>
+
+      <fieldset id="tripSettings" disabled>
+        <legend>Your trips</legend>
+        <label>Leaving from (home station or address)
+          <input id="s_homeAddress" type="text" placeholder="e.g. Union Sq Station, New York, NY">
+        </label>
+        <div class="grid2">
+          <label>Walk to it (min)
+            <input id="s_walkToStationMin" type="number" inputmode="numeric" min="0" max="30">
+          </label>
+          <label>Walk instead if under (min)
+            <input id="s_maxWalkMin" type="number" inputmode="numeric" min="0" max="60">
+          </label>
+          <label>Arrive at least (min early)
+            <input id="s_minEarlyMin" type="number" inputmode="numeric" min="0" max="30">
+          </label>
+          <label>…and at most (min early)
+            <input id="s_maxEarlyMin" type="number" inputmode="numeric" min="1" max="60">
+          </label>
+        </div>
+        <label class="check"><input id="s_chainEvents" type="checkbox"> Plan from my previous event if it ends shortly before</label>
+        <label class="check"><input id="s_subwayOnly" type="checkbox"> Subway only (no buses)</label>
+        <label class="check"><input id="s_checkAlerts" type="checkbox"> Check MTA delay alerts</label>
+        <label class="check"><input id="s_includeMultiDay" type="checkbox"> Include multi-day events (e.g. a conference), planned for their start time</label>
+        <p class="hint">All-day events are always ignored — they have no start time.</p>
+      </fieldset>
+
+      <fieldset id="notifSettings" disabled>
+        <legend>Notifications</legend>
+        <div class="grid2">
+          <label>Heads-up (min before leaving)
+            <input id="s_headsUpMin" type="number" inputmode="numeric" min="20" max="240">
+          </label>
+          <label>Second warning (min before)
+            <input id="s_warningMin" type="number" inputmode="numeric" min="5" max="60">
+          </label>
+          <label>Quiet heads-ups from
+            <select id="s_quietStartHour"></select>
+          </label>
+          <label>until
+            <select id="s_quietEndHour"></select>
+          </label>
+        </div>
+        <label class="check"><input id="s_showEventDetails" type="checkbox"> Show event names &amp; places in notifications</label>
+        <p class="hint" id="topicHint"></p>
+        <button type="button" id="testBtn" class="secondary">Send test notification</button>
+        <p class="hint" id="testResult"></p>
+      </fieldset>
+
+      <fieldset id="calSettings" disabled>
+        <legend>Calendars to watch</legend>
+        <div id="calList" class="hint">Connect first to see your calendars.</div>
+      </fieldset>
+
+      <details id="connection">
+        <summary>Connection</summary>
+        <label>Apps Script web app URL
+          <input id="apiUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec">
+        </label>
+        <label>API key
+          <input id="apiKey" type="text" autocomplete="off">
+        </label>
+        <button type="button" id="connectBtn" class="secondary">Connect</button>
+      </details>
+
+      <p class="hint" id="saveResult"></p>
+      <div class="row end">
+        <button value="cancel" class="secondary" formnovalidate>Close</button>
+        <button value="save" id="saveBtn">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

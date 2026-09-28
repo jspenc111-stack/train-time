@@ -1,0 +1,7 @@
+# Keeps the GitHub Actions used for testing and deploying up to date (opens small PRs monthly).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
