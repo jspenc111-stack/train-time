@@ -14,4 +14,4 @@
 - [ ] SPEC.md / README updated if behavior or setup changed
 - [ ] If `apps-script/` changed: `VERSION` and `EXPECTED_BACKEND_VERSION` bumped to match
 - [ ] If `web/` changed: `CACHE` in `web/sw.js` bumped
-- [ ] No personal details or secrets added (addresses, keys, ntfy topic, web app link, emails)
+- [ ] No personal details or secrets added (addresses, keys, push keys or device addresses, web app link, emails)
