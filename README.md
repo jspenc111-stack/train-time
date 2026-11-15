@@ -1,3 +1,5 @@
+> **Retired — Leave By now lives in a private repo.** This repo only publishes a "Leave By has moved" page, and will be archived.
+
 # Leave By 🚇
 
 Tells you **when to leave** and **which subway to take** for your Google Calendar events in NYC. You get a heads-up about 90 minutes before you need to leave, a 15-minute warning, and "leave now". If you're coming from another event, it plans from there.
