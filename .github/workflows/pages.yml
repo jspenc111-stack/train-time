@@ -1,7 +1,11 @@
-name: Deploy PWA to GitHub Pages
+name: Publish "Leave By has moved" page
+# One-time: replaces the old app on GitHub Pages with a page pointing to the new address,
+# plus a clean-up service worker that removes only Leave By's old files from the phone.
 on:
   push:
     branches: [main]
+    paths:
+      - 'moved/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -18,14 +22,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Run backend tests
-        run: node tests/run.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: moved
       - id: deployment
         uses: actions/deploy-pages@v4

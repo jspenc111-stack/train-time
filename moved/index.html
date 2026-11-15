@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Leave By has moved</title>
+  <meta name="theme-color" content="#0b1020">
+  <meta name="robots" content="noindex">
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #0b1020; color: #e8ecf8; font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { max-width: 420px; padding: 32px 20px; text-align: center; }
+    .big { font-size: 56px; }
+    h1 { font-size: 28px; margin: 8px 0 12px; }
+    p { color: #a9b3cf; margin: 0 0 28px; }
+    a.btn { display: block; padding: 18px 20px; border-radius: 14px; background: #ffcc00; color: #111;
+      font-weight: 800; font-size: 20px; text-decoration: none; }
+    .addr { margin-top: 14px; font-size: 14px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="big">🚇</div>
+    <h1>Leave By has moved</h1>
+    <p>Open the new app, install it from Chrome's ⋮ menu, and uninstall this old one.</p>
+    <a class="btn" id="go" href="https://leave-by.pages.dev/">Open the new app</a>
+    <p class="addr" id="addr">https://leave-by.pages.dev/</p>
+  </main>
+  <script>
+    // Clean up the old Leave By on this shared address — and ONLY Leave By.
+    // Other apps (e.g. Swerve) share this address's storage, so never wipe all of localStorage.
+    (function () {
+      var LEAVE_BY_KEYS = ['apiUrl', 'apiKey', 'lastData', 'settingsCache'];
+      LEAVE_BY_KEYS.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } });
+      // Ask the browser to fetch the clean-up service worker (moved/sw.js) for Leave By's old registration only.
+      if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          regs.forEach(function (r) {
+            if (new URL(r.scope).pathname === location.pathname.replace(/[^\/]*$/, '')) r.update().catch(function () {});
+          });
+        }).catch(function () {});
+      }
+    })();
+  </script>
+</body>
+</html>
